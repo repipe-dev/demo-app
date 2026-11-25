@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app
+  namespace: demo-staging
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: demo-app }
+  template:
+    metadata:
+      labels: { app: demo-app }
+    spec:
+      containers:
+        - name: demo-app
+          image: 012345678901.dkr.ecr.eu-central-1.amazonaws.com/demo-app
+          ports: [{ containerPort: 8000 }]
+          readinessProbe:
+            httpGet: { path: /health, port: 8000 }
+            initialDelaySeconds: 3
+          env:
+            - name: APP_VERSION
+              valueFrom:
+                fieldRef: { fieldPath: metadata.labels['app.kubernetes.io/version'] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-app
+  namespace: demo-staging
+spec:
+  selector: { app: demo-app }
+  ports:
+    - port: 80
+      targetPort: 8000

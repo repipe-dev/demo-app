@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: [self-hosted, docker]   # see MIGRATION.md §runners
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: pip install -e .[dev]
+
+      - name: Test
+        run: pytest -v --junitxml=results/junit.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit
+          path: results/junit.xml
+
+  container:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write           # OIDC — no static AWS keys
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::012345678901:role/gha-demo-app-ci
+          aws-region: eu-central-1
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          push: ${{ github.ref == 'refs/heads/main' }}
+          tags: |
+            012345678901.dkr.ecr.eu-central-1.amazonaws.com/demo-app:${{ github.run_number }}
+            012345678901.dkr.ecr.eu-central-1.amazonaws.com/demo-app:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy-staging:
+    needs: container
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging          # protection rules: reviewers + tag main-only
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::012345678901:role/gha-demo-app-deploy
+          aws-region: eu-central-1
+
+      - name: Update image
+        run: |
+          kubectl -n demo-staging set image deploy/demo-app \
+            demo-app=012345678901.dkr.ecr.eu-central-1.amazonaws.com/demo-app:${{ github.run_number }}
+          kubectl -n demo-staging rollout status deploy/demo-app --timeout=120s
