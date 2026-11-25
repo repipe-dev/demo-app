@@ -8,16 +8,25 @@ on:
 permissions:
   contents: read
 
+# AWS wiring gate: with AWS_ROLE_ARN set (repo secret), the OIDC + ECR
+# push + deploy steps run for real. Without it, everything that CAN run
+# runs — tests, docker build — and AWS-dependent steps skip cleanly.
+# This is the same shape used on real migrations: no static keys anywhere.
+env:
+  AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+
 jobs:
   build-and-test:
-    runs-on: [self-hosted, docker]   # see MIGRATION.md §runners
+    # In the migration case study (MIGRATION.md §2) this job targets
+    # [self-hosted, docker] — warm caches, existing hardware. This public
+    # demo has no runner fleet, so it uses hosted runners.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: Install
         run: pip install -e .[dev]
@@ -36,36 +45,45 @@ jobs:
     needs: build-and-test
     runs-on: ubuntu-latest
     permissions:
-      id-token: write           # OIDC — no static AWS keys
+      id-token: write           # OIDC — no static AWS keys, ever
       contents: read
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure AWS credentials
+        if: env.AWS_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::012345678901:role/gha-demo-app-ci
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: eu-central-1
 
       - name: Login to ECR
+        if: env.AWS_ROLE_ARN != ''
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build and push
+      - name: Build (and push when AWS wiring exists)
         uses: docker/build-push-action@v6
         with:
-          push: ${{ github.ref == 'refs/heads/main' }}
+          push: ${{ env.AWS_ROLE_ARN != '' }}
           tags: |
             012345678901.dkr.ecr.eu-central-1.amazonaws.com/demo-app:${{ github.run_number }}
             012345678901.dkr.ecr.eu-central-1.amazonaws.com/demo-app:sha-${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Wiring note
+        if: env.AWS_ROLE_ARN == ''
+        run: |
+          echo "Docker image built successfully."
+          echo "ECR push + deploy skipped: AWS_ROLE_ARN repo secret not set"
+          echo "(this repo ships with placeholder ARNs — see MIGRATION.md §3)."
+
   deploy-staging:
     needs: container
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && env.AWS_ROLE_ARN != ''
     runs-on: ubuntu-latest
-    environment: staging          # protection rules: reviewers + tag main-only
+    environment: staging          # protection rules: reviewers + main-only
     permissions:
       id-token: write
     steps:
@@ -74,7 +92,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::012345678901:role/gha-demo-app-deploy
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: eu-central-1
 
       - name: Update image
